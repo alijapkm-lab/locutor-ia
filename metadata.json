@@ -1,0 +1,6 @@
+{
+  "name": "Locutor y Narrador de Guiones IA",
+  "description": "Transforma guiones en narraciones realistas con voz humana de locutor, música de fondo en momentos de tensión, control de tono y velocidad, exportación a MP3 y sistema de corrección inteligente.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
