@@ -7,6 +7,7 @@ import { QuotaMonitorWidget } from './components/QuotaMonitorWidget';
 import { GenerationModal } from './components/GenerationModal';
 import { CorrectionModal } from './components/CorrectionModal';
 import { ApiKeyModal } from './components/ApiKeyModal';
+import { DownloadAppModal } from './components/DownloadAppModal';
 import { TakesHistory } from './components/TakesHistory';
 import { SAMPLE_SCRIPTS } from './data/voicesAndTones';
 import { NarrationResult, NarrationSettings, QuotaStatus, EngineMode, ApiProvider } from './types';
@@ -33,6 +34,7 @@ export default function App() {
     }
   });
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
+  const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false);
   const [keyNotice, setKeyNotice] = useState<string | null>(null);
 
   const [settings, setSettings] = useState<NarrationSettings>({
@@ -293,6 +295,7 @@ export default function App() {
         onSelectSample={(idx) => handleApplySample(SAMPLE_SCRIPTS[idx])}
         customApiKey={customApiKey}
         onOpenApiKeyModal={() => setIsApiKeyModalOpen(true)}
+        onOpenDownloadModal={() => setIsDownloadModalOpen(true)}
       />
 
       {/* Main Studio Body */}
@@ -457,6 +460,12 @@ export default function App() {
         currentProvider={customApiProvider}
         onSaveApiKey={handleSaveApiKey}
         onRemoveApiKey={handleRemoveApiKey}
+      />
+
+      {/* Desktop App Download & Local Launcher Modal */}
+      <DownloadAppModal
+        isOpen={isDownloadModalOpen}
+        onClose={() => setIsDownloadModalOpen(false)}
       />
     </div>
   );

@@ -1,5 +1,7 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
+import JSZip from 'jszip';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { Communicate } from 'edge-tts-universal';
@@ -633,6 +635,101 @@ app.post('/api/validate-key', async (req, res) => {
       return res.status(429).json({ valid: false, error: 'Esta clave API no tiene créditos o ha agotado su cuota de peticiones.' });
     }
     return res.status(400).json({ valid: false, error: `Error al validar la clave: ${msg || 'Error de conexión'}` });
+  }
+});
+
+// Helper to recursively add directory to JSZip
+function addDirectoryToZip(zipInstance: JSZip, localDirPath: string, zipFolderPrefix: string = '') {
+  if (!fs.existsSync(localDirPath)) return;
+  const items = fs.readdirSync(localDirPath);
+  for (const item of items) {
+    const fullPath = path.join(localDirPath, item);
+    const stat = fs.statSync(fullPath);
+    const zipPath = zipFolderPrefix ? `${zipFolderPrefix}/${item}` : item;
+    if (stat.isDirectory()) {
+      addDirectoryToZip(zipInstance, fullPath, zipPath);
+    } else {
+      zipInstance.file(zipPath, fs.readFileSync(fullPath));
+    }
+  }
+}
+
+// Download full project ZIP endpoint for local desktop execution
+app.get('/api/download-app-zip', async (req, res) => {
+  try {
+    const zip = new JSZip();
+
+    // Root project files
+    const rootFiles = [
+      'package.json',
+      'tsconfig.json',
+      'vite.config.ts',
+      'index.html',
+      'metadata.json',
+      'LEEME_LOCAL.md',
+      'iniciar_app.bat',
+      'iniciar_app.sh',
+      '.env.example',
+      '.gitignore',
+      'server.ts',
+    ];
+
+    for (const file of rootFiles) {
+      const filePath = path.join(process.cwd(), file);
+      if (fs.existsSync(filePath)) {
+        zip.file(file, fs.readFileSync(filePath));
+      }
+    }
+
+    // Include source code folder
+    addDirectoryToZip(zip, path.join(process.cwd(), 'src'), 'src');
+
+    // Include assets folder if present
+    addDirectoryToZip(zip, path.join(process.cwd(), 'assets'), 'assets');
+
+    // Include public folder if present
+    addDirectoryToZip(zip, path.join(process.cwd(), 'public'), 'public');
+
+    const contentBuffer = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 },
+    });
+
+    const filename = 'Estudio-Locucion-IA-App.zip';
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', contentBuffer.length);
+    res.send(contentBuffer);
+  } catch (err: any) {
+    console.error('Download app ZIP failed:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message || 'Error al empaquetar la aplicación.' });
+    }
+  }
+});
+
+// Download Windows launcher (.bat) directly
+app.get('/api/download-launcher/windows', (req, res) => {
+  const filePath = path.join(process.cwd(), 'iniciar_app.bat');
+  if (fs.existsSync(filePath)) {
+    res.setHeader('Content-Disposition', 'attachment; filename="iniciar_app.bat"');
+    res.setHeader('Content-Type', 'application/x-bat');
+    fs.createReadStream(filePath).pipe(res);
+  } else {
+    res.status(404).send('Archivo iniciar_app.bat no encontrado');
+  }
+});
+
+// Download Mac/Linux launcher (.sh) directly
+app.get('/api/download-launcher/unix', (req, res) => {
+  const filePath = path.join(process.cwd(), 'iniciar_app.sh');
+  if (fs.existsSync(filePath)) {
+    res.setHeader('Content-Disposition', 'attachment; filename="iniciar_app.sh"');
+    res.setHeader('Content-Type', 'application/x-sh');
+    fs.createReadStream(filePath).pipe(res);
+  } else {
+    res.status(404).send('Archivo iniciar_app.sh no encontrado');
   }
 });
 
