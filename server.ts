@@ -367,9 +367,63 @@ function createSyntheticWavFallback(durationSec = 3, sampleRate = 24000): Buffer
   return createWavFromPCM(pcm, sampleRate, 1);
 }
 
+// Neural Voice Mapping for All Character Profiles
+const CHARACTER_VOICE_MAP: Record<string, { voice: string; label: string; gender: 'Masculina' | 'Femenina'; defaultPitch: string; defaultRate: string }> = {
+  Fenrir: { voice: 'es-ES-AlvaroNeural', label: 'Fenrir (Voz Masculina Profunda / Álvaro)', gender: 'Masculina', defaultPitch: '-4Hz', defaultRate: '-5%' },
+  Kore: { voice: 'es-ES-ElviraNeural', label: 'Kore (Voz Femenina Cálida y Elegante / Elvira)', gender: 'Femenina', defaultPitch: '+0Hz', defaultRate: '+0%' },
+  Puck: { voice: 'es-MX-JorgeNeural', label: 'Puck (Voz Masculina Juvenil y Dinámica / Jorge)', gender: 'Masculina', defaultPitch: '+4Hz', defaultRate: '+8%' },
+  Charon: { voice: 'es-CO-GonzaloNeural', label: 'Charon (Voz Masculina Misterio y Suspenso / Gonzalo)', gender: 'Masculina', defaultPitch: '-6Hz', defaultRate: '-8%' },
+  Zephyr: { voice: 'es-MX-DaliaNeural', label: 'Zephyr (Voz Femenina Serena y Suave / Dalia)', gender: 'Femenina', defaultPitch: '-2Hz', defaultRate: '-5%' },
+  free_male: { voice: 'es-ES-AlvaroNeural', label: 'Voz Masculina Neuronal (Álvaro)', gender: 'Masculina', defaultPitch: '+0Hz', defaultRate: '+0%' },
+  free_female: { voice: 'es-ES-ElviraNeural', label: 'Voz Femenina Neuronal (Elvira)', gender: 'Femenina', defaultPitch: '+0Hz', defaultRate: '+0%' },
+};
+
+/**
+ * Intelligent Provider Detector: determines if a custom key is Gemini, Groq, OpenAI, or ElevenLabs
+ */
+function detectKeyProvider(key?: string, declaredProvider?: string): 'gemini' | 'groq' | 'openai' | 'elevenlabs' | 'grok' {
+  if (!key || typeof key !== 'string') return (declaredProvider as any) || 'gemini';
+  const trimmed = key.trim();
+  if (trimmed.startsWith('gsk_')) return 'groq';
+  if (trimmed.startsWith('xai-')) return 'grok';
+  if (trimmed.startsWith('sk-')) return 'openai';
+  if (trimmed.startsWith('xi-')) return 'elevenlabs';
+  if (trimmed.startsWith('AIza')) return 'gemini';
+  return (declaredProvider as any) || 'gemini';
+}
+
+/**
+ * Call Groq Cloud API for ultra-fast script analysis, tone directives, and feedback refinement
+ */
+async function callGroqChat(apiKey: string, prompt: string, jsonMode = true): Promise<string> {
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey.trim()}`,
+      'Content-Type': 'application/json',
+      'User-Agent': 'aistudio-build',
+    },
+    body: JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      messages: [
+        { role: 'system', content: 'Eres un Director de Doblaje y Análisis de Guiones de Locución Profesional.' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.2,
+      ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Error de Groq API (${res.status}): ${errText}`);
+  }
+  const data: any = await res.json();
+  return data.choices?.[0]?.message?.content || '';
+}
+
 /**
  * High-reliability Free Neural Speech Synthesis (Edge Neural + SAPI / Web TTS Fallback Engine)
- * Synthesizes natural Spanish speech with zero token cost, with dedicated Male and Female neural voices.
+ * Synthesizes natural Spanish speech with zero token cost, with dedicated character profiles.
  */
 async function generateFreeSpeech(
   script: string,
@@ -380,23 +434,48 @@ async function generateFreeSpeech(
     voice?: string;
     speed?: number;
     pitch?: number;
+    speedLabel?: string;
+    pitchLabel?: string;
   } = {}
 ): Promise<{ buffer: Buffer; durationSec: number; voiceUsed: string; genderUsed: 'Masculina' | 'Femenina' }> {
   const lang = options.language || 'es';
-  let targetGender: 'male' | 'female' = 'male';
-  if (options.gender === 'male') {
-    targetGender = 'male';
-  } else if (options.gender === 'female') {
-    targetGender = 'female';
-  } else {
-    // auto: if voice is Kore or Zephyr -> female, else male
-    targetGender = (options.voice === 'Kore' || options.voice === 'Zephyr') ? 'female' : 'male';
+  const voiceKey = options.voice || (options.gender === 'female' ? 'Kore' : 'Fenrir');
+  const mapped = CHARACTER_VOICE_MAP[voiceKey] || (options.gender === 'female' ? CHARACTER_VOICE_MAP['Kore'] : CHARACTER_VOICE_MAP['Fenrir']);
+
+  let edgeVoice = mapped.voice;
+  let targetGender = mapped.gender;
+
+  if (options.gender === 'female' && mapped.gender !== 'Femenina') {
+    edgeVoice = 'es-ES-ElviraNeural';
+    targetGender = 'Femenina';
+  } else if (options.gender === 'male' && mapped.gender !== 'Masculina') {
+    edgeVoice = 'es-ES-AlvaroNeural';
+    targetGender = 'Masculina';
   }
 
-  const edgeVoice = targetGender === 'female' ? 'es-ES-ElviraNeural' : 'es-ES-AlvaroNeural';
-  console.log(`[Free Neural Engine] Synthesizing speech with voice: ${edgeVoice} (Gender: ${targetGender})`);
+  // Calculate rate and pitch modifiers
+  const speedRateMap: Record<string, string> = {
+    muy_lento: '-20%',
+    lento: '-10%',
+    normal: mapped.defaultRate || '+0%',
+    rapido: '+15%',
+    muy_rapido: '+30%',
+  };
 
-  // Chunk text into bite-sized segments (250 chars) for ultra-fast and resilient streaming
+  const pitchRateMap: Record<string, string> = {
+    muy_grave: '-12Hz',
+    grave: '-6Hz',
+    neutro: mapped.defaultPitch || '+0Hz',
+    agudo: '+6Hz',
+    muy_agudo: '+12Hz',
+  };
+
+  const rateStr = speedRateMap[options.speedLabel || 'normal'] || mapped.defaultRate || '+0%';
+  const pitchStr = pitchRateMap[options.pitchLabel || 'neutro'] || mapped.defaultPitch || '+0Hz';
+
+  console.log(`[Neural Speech Engine] Synthesizing with voice: ${edgeVoice} (${voiceKey}), rate: ${rateStr}, pitch: ${pitchStr}`);
+
+  // Chunk text into bite-sized segments (250 chars) for ultra-fast streaming
   const textChunks = splitScriptForFreeTTS(script, 250);
   const edgeAudioBuffers: Buffer[] = [];
   let edgeFailed = false;
@@ -405,7 +484,11 @@ async function generateFreeSpeech(
     if (!chunkText.trim()) continue;
     try {
       const chunkPromise = (async () => {
-        const comm = new Communicate(chunkText.trim(), { voice: edgeVoice });
+        const comm = new Communicate(chunkText.trim(), {
+          voice: edgeVoice,
+          rate: rateStr,
+          pitch: pitchStr,
+        });
         const bufs: Buffer[] = [];
         for await (const chunk of comm.stream()) {
           if (chunk.type === 'audio' && chunk.data) {
@@ -426,7 +509,7 @@ async function generateFreeSpeech(
         break;
       }
     } catch (chunkErr) {
-      console.warn('[Free Neural Engine] Edge chunk failed:', chunkErr);
+      console.warn('[Neural Engine] Edge chunk failed:', chunkErr);
       edgeFailed = true;
       break;
     }
@@ -438,13 +521,13 @@ async function generateFreeSpeech(
     return {
       buffer: combined,
       durationSec,
-      voiceUsed: targetGender === 'female' ? 'Voz Femenina Neuronal (Elvira)' : 'Voz Masculina Neuronal (Álvaro)',
-      genderUsed: targetGender === 'female' ? 'Femenina' : 'Masculina',
+      voiceUsed: mapped.label,
+      genderUsed: targetGender,
     };
   }
 
   // Fallback to Google / Regional HTTP mirror
-  console.log('[Free Neural Engine] Using regional TTS mirror fallback...');
+  console.log('[Neural Engine] Using regional TTS mirror fallback...');
   const phrases = splitScriptForFreeTTS(script, 140);
   const audioBuffers: Buffer[] = [];
 
@@ -490,8 +573,8 @@ async function generateFreeSpeech(
     return {
       buffer: combinedAudio,
       durationSec,
-      voiceUsed: targetGender === 'female' ? 'Voz Femenina (SAPI/Web)' : 'Voz Masculina (SAPI/Web)',
-      genderUsed: targetGender === 'female' ? 'Femenina' : 'Masculina',
+      voiceUsed: mapped.label,
+      genderUsed: targetGender,
     };
   }
 
@@ -500,8 +583,8 @@ async function generateFreeSpeech(
   return {
     buffer: fallbackWav,
     durationSec: Math.max(3, Math.round(script.length / 25)),
-    voiceUsed: 'Voz Sintética de Emergencia',
-    genderUsed: targetGender === 'female' ? 'Femenina' : 'Masculina',
+    voiceUsed: `${mapped.label} (Modo Sintético)`,
+    genderUsed: targetGender,
   };
 }
 
@@ -838,9 +921,11 @@ app.all('/api/tts/preview', async (req, res) => {
   try {
     const voice = (req.method === 'GET' ? req.query.voice : req.body.voice) as string || 'Kore';
     const customApiKey = ((req.headers['x-gemini-api-key'] as string) || (req.body?.customApiKey as string) || (req.query?.customApiKey as string))?.trim();
+    const declaredProvider = ((req.body?.customApiProvider as string) || (req.query?.customApiProvider as string))?.trim();
+    const provider = detectKeyProvider(customApiKey, declaredProvider);
 
     const voiceInfo = VOICE_PREVIEWS[voice] || VOICE_PREVIEWS['Kore'];
-    const cacheKey = `${voice}_${customApiKey ? 'custom' : 'default'}`;
+    const cacheKey = `preview_${voice}_${provider}_${customApiKey ? 'custom' : 'default'}`;
 
     // Return cached preview if available
     if (voicePreviewCache.has(cacheKey)) {
@@ -855,58 +940,66 @@ app.all('/api/tts/preview', async (req, res) => {
       });
     }
 
-    const { inCooldown } = checkGeminiCooldown();
+    // If provider is Gemini (and key is Gemini or default), attempt Gemini TTS HD
+    if (provider === 'gemini') {
+      const { inCooldown } = checkGeminiCooldown();
+      const hasKey = Boolean(customApiKey || process.env.GEMINI_API_KEY);
+      if (!inCooldown && hasKey) {
+        try {
+          const ai = getGenAI(customApiKey);
+          const prompt = buildTTSPrompt(voiceInfo.phrase, 0, 1, {
+            tone: voiceInfo.tone,
+            speedLabel: voiceInfo.speedLabel,
+            pitchLabel: voiceInfo.pitchLabel,
+            language: 'es',
+            customInstructions: 'Locución breve y natural de presentación para preescucha de voz.',
+          });
 
-    // If Gemini is available (or user provided custom key), try Gemini TTS HD
-    if ((!inCooldown || customApiKey) && (customApiKey || process.env.GEMINI_API_KEY)) {
-      try {
-        const ai = getGenAI(customApiKey);
-        const prompt = buildTTSPrompt(voiceInfo.phrase, 0, 1, {
-          tone: voiceInfo.tone,
-          speedLabel: voiceInfo.speedLabel,
-          pitchLabel: voiceInfo.pitchLabel,
-          language: 'es',
-          customInstructions: 'Locución breve y natural de presentación para preescucha de voz.',
-        });
-
-        const ttsResponse = await ai.models.generateContent({
-          model: 'gemini-3.1-flash-tts-preview',
-          contents: [{ parts: [{ text: prompt }] }],
-          config: {
-            responseModalities: [Modality.AUDIO],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: voice,
+          const ttsResponse = await ai.models.generateContent({
+            model: 'gemini-3.1-flash-tts-preview',
+            contents: [{ parts: [{ text: prompt }] }],
+            config: {
+              responseModalities: [Modality.AUDIO],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: voice,
+                  },
                 },
               },
             },
-          },
-        });
-
-        const audioBase64 = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (audioBase64) {
-          const pcmBuf = Buffer.from(audioBase64, 'base64');
-          const wavBuffer = createWavFromPCM(pcmBuf, 24000, 1);
-          const wavBase64 = wavBuffer.toString('base64');
-          voicePreviewCache.set(cacheKey, wavBase64);
-
-          return res.json({
-            success: true,
-            voice,
-            audioWavBase64: wavBase64,
-            durationSec: 4,
-            samplePhrase: voiceInfo.phrase,
-            engineUsed: 'gemini_tts',
           });
+
+          const audioBase64 = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+          if (audioBase64) {
+            const pcmBuf = Buffer.from(audioBase64, 'base64');
+            const wavBuffer = createWavFromPCM(pcmBuf, 24000, 1);
+            const wavBase64 = wavBuffer.toString('base64');
+            voicePreviewCache.set(cacheKey, wavBase64);
+
+            return res.json({
+              success: true,
+              voice,
+              audioWavBase64: wavBase64,
+              durationSec: 4,
+              samplePhrase: voiceInfo.phrase,
+              engineUsed: 'gemini_tts',
+            });
+          }
+        } catch (geminiErr: any) {
+          console.warn(`[Preview] Gemini TTS fallback for ${voice}:`, geminiErr?.message);
         }
-      } catch (geminiErr: any) {
-        console.warn(`[Preview] Gemini TTS error for ${voice}, falling back to Free TTS:`, geminiErr?.message);
       }
     }
 
-    // Free TTS fallback for preview
-    const freeRes = await generateFreeSpeech(voiceInfo.phrase, { language: 'es', tone: voiceInfo.tone });
+    // High fidelity Neural Voice preview mapped to the specific character profile (Fenrir, Kore, Puck, Charon, Zephyr)
+    const freeRes = await generateFreeSpeech(voiceInfo.phrase, {
+      language: 'es',
+      tone: voiceInfo.tone,
+      voice,
+      speedLabel: voiceInfo.speedLabel,
+      pitchLabel: voiceInfo.pitchLabel,
+    });
     const wavBase64 = freeRes.buffer.toString('base64');
     voicePreviewCache.set(cacheKey, wavBase64);
 
@@ -916,7 +1009,8 @@ app.all('/api/tts/preview', async (req, res) => {
       audioWavBase64: wavBase64,
       durationSec: freeRes.durationSec,
       samplePhrase: voiceInfo.phrase,
-      engineUsed: 'free_fallback',
+      engineUsed: provider === 'groq' ? 'groq_neural_preview' : 'neural_studio_preview',
+      voiceUsed: freeRes.voiceUsed,
     });
   } catch (err: any) {
     console.error('Error in /api/tts/preview:', err);
@@ -941,6 +1035,8 @@ app.post('/api/analyze-script', async (req, res) => {
   try {
     const { script } = req.body;
     const customApiKey = ((req.headers['x-gemini-api-key'] as string) || (req.body?.customApiKey as string))?.trim();
+    const declaredProvider = (req.body?.customApiProvider as string)?.trim();
+    const provider = detectKeyProvider(customApiKey, declaredProvider);
 
     if (!script || typeof script !== 'string') {
       return res.status(400).json({ error: 'El guión es requerido.' });
@@ -956,12 +1052,36 @@ app.post('/api/analyze-script', async (req, res) => {
     let tensionMoments: string[] = [];
     let detectedGenre = 'Narrativa';
 
-    const { inCooldown } = checkGeminiCooldown();
-
-    if (!inCooldown || customApiKey) {
+    // 1. Groq Ultra-fast Script Analysis
+    if (provider === 'groq' && customApiKey) {
       try {
-        const ai = getGenAI(customApiKey);
-        const analysisPrompt = `Analiza el siguiente guión para una locución/narración profesional.
+        const groqPrompt = `Analiza el siguiente guión para locución profesional en español.
+Devuelve un JSON estrictamente válido con los campos:
+- "tensionScore": número entero de 0 a 100 con el nivel de tensión o dramatismo.
+- "detectedGenre": género narrativo (ej: "Misterio / Thriller", "Documental Histórico", "Comercial / Promo", "Drama Emocional", "Noticia", "Fantasía").
+- "tensionMoments": array de hasta 3 frases o fragmentos del guión con mayor carga dramática o tensión.
+- "recommendedTone": uno de ('locutor_clasico', 'dramatico', 'epico', 'documental', 'entusiasta', 'misterio', 'calido').
+
+Guión:
+"""
+${script.slice(0, 3000)}
+"""`;
+        const groqJsonStr = await callGroqChat(customApiKey, groqPrompt, true);
+        const parsed = JSON.parse(groqJsonStr || '{}');
+        if (typeof parsed.tensionScore === 'number') tensionScore = parsed.tensionScore;
+        if (parsed.detectedGenre) detectedGenre = parsed.detectedGenre;
+        if (Array.isArray(parsed.tensionMoments)) tensionMoments = parsed.tensionMoments;
+      } catch (groqErr) {
+        console.warn('Groq script analysis fallback:', groqErr);
+      }
+    } else if (provider === 'gemini') {
+      // 2. Gemini Analysis
+      const { inCooldown } = checkGeminiCooldown();
+
+      if (!inCooldown || customApiKey) {
+        try {
+          const ai = getGenAI(customApiKey);
+          const analysisPrompt = `Analiza el siguiente guión para una locución/narración profesional.
 Devuelve un JSON con:
 1. "tensionScore": número del 0 al 100 indicando el nivel de tensión o suspenso en la historia.
 2. "detectedGenre": género de la narración (ej: "Misterio / Thriller", "Documental Histórico", "Comercial / Promo", "Drama Emocional", "Noticia / Reportaje", "Fantasía Épica").
@@ -973,34 +1093,35 @@ Guión a analizar:
 ${script.slice(0, 3000)}
 """`;
 
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.7-flash',
-          contents: analysisPrompt,
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                tensionScore: { type: Type.INTEGER },
-                detectedGenre: { type: Type.STRING },
-                tensionMoments: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
+          const response = await ai.models.generateContent({
+            model: 'gemini-3.7-flash',
+            contents: analysisPrompt,
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  tensionScore: { type: Type.INTEGER },
+                  detectedGenre: { type: Type.STRING },
+                  tensionMoments: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  recommendedTone: { type: Type.STRING },
                 },
-                recommendedTone: { type: Type.STRING },
+                required: ['tensionScore', 'detectedGenre', 'tensionMoments'],
               },
-              required: ['tensionScore', 'detectedGenre', 'tensionMoments'],
             },
-          },
-        });
+          });
 
-        const parsed = JSON.parse(response.text || '{}');
-        if (typeof parsed.tensionScore === 'number') tensionScore = parsed.tensionScore;
-        if (parsed.detectedGenre) detectedGenre = parsed.detectedGenre;
-        if (Array.isArray(parsed.tensionMoments)) tensionMoments = parsed.tensionMoments;
-      } catch (analysisErr: any) {
-        if (!customApiKey && (analysisErr.status === 429 || analysisErr.message?.includes('RESOURCE_EXHAUSTED'))) {
-          markGeminiQuotaExhausted(analysisErr.message || 'Rate limit alcanzado', 60);
+          const parsed = JSON.parse(response.text || '{}');
+          if (typeof parsed.tensionScore === 'number') tensionScore = parsed.tensionScore;
+          if (parsed.detectedGenre) detectedGenre = parsed.detectedGenre;
+          if (Array.isArray(parsed.tensionMoments)) tensionMoments = parsed.tensionMoments;
+        } catch (analysisErr: any) {
+          if (!customApiKey && (analysisErr.status === 429 || analysisErr.message?.includes('RESOURCE_EXHAUSTED'))) {
+            markGeminiQuotaExhausted(analysisErr.message || 'Rate limit alcanzado', 60);
+          }
         }
       }
     }
@@ -1045,6 +1166,7 @@ app.post('/api/tts/narrate', async (req, res) => {
     } = req.body;
 
     const customApiKey = ((req.headers['x-gemini-api-key'] as string) || (req.body?.customApiKey as string))?.trim();
+    const provider = detectKeyProvider(customApiKey, customApiProvider);
 
     if (!script || typeof script !== 'string' || !script.trim()) {
       return res.status(400).json({ error: 'El guión es requerido para generar la locución.' });
@@ -1058,7 +1180,14 @@ app.post('/api/tts/narrate', async (req, res) => {
     // 1. Check if user explicitly wants Free Fallback Only
     if (engineMode === 'free_only') {
       console.log('[TTS Request] Generating directly with Free Fallback Engine (User Preference)');
-      const freeResult = await generateFreeSpeech(script, { language, tone, gender: freeVoiceGender, voice });
+      const freeResult = await generateFreeSpeech(script, {
+        language,
+        tone,
+        gender: freeVoiceGender,
+        voice,
+        speedLabel,
+        pitchLabel,
+      });
       geminiQuotaState.fallbackCount++;
 
       return res.json({
@@ -1074,8 +1203,33 @@ app.post('/api/tts/narrate', async (req, res) => {
       });
     }
 
-    // 2. OpenAI TTS Provider (if user provided OpenAI API key)
-    if (customApiProvider === 'openai' && customApiKey) {
+    // 2. Groq Provider (Groq LPU Acceleration + Studio Character Neural Voice Catalog)
+    if (provider === 'groq') {
+      console.log(`[TTS Request] Synthesizing with Groq LPU + Neural Studio Voice Catalog (${voice})...`);
+      const freeResult = await generateFreeSpeech(script, {
+        language,
+        tone,
+        gender: freeVoiceGender,
+        voice,
+        speedLabel,
+        pitchLabel,
+      });
+
+      return res.json({
+        success: true,
+        audioWavBase64: freeResult.buffer.toString('base64'),
+        audioDurationSec: freeResult.durationSec,
+        chunksProcessed: 1,
+        tensionDetected: isTense,
+        tensionSummary,
+        engineUsed: 'groq_neural',
+        engineLabel: `Groq LPU + Catálogo de Voces de Estudio (${freeResult.voiceUsed})`,
+        quotaNotice: 'Guión procesado con Groq Cloud y sintetizado con el catálogo de voces de estudio de alta fidelidad.',
+      });
+    }
+
+    // 3. OpenAI TTS Provider (if user provided OpenAI API key)
+    if (provider === 'openai' && customApiKey) {
       try {
         console.log('[TTS Request] Synthesizing with OpenAI TTS...');
         const openAiVoiceMap: Record<string, string> = {
@@ -1120,12 +1274,19 @@ app.post('/api/tts/narrate', async (req, res) => {
       }
     }
 
-    // 3. Check if default Gemini is in Cooldown AND no customApiKey was supplied
+    // 4. Check if default Gemini is in Cooldown AND no customApiKey was supplied
     const { inCooldown, remainingSec } = checkGeminiCooldown();
 
     if (!customApiKey && inCooldown && engineMode === 'auto') {
-      console.log(`[TTS Auto-Failover] Gemini token refill in ${remainingSec}s. Using Free Fallback Engine (${freeVoiceGender})...`);
-      const freeResult = await generateFreeSpeech(script, { language, tone, gender: freeVoiceGender, voice });
+      console.log(`[TTS Auto-Failover] Gemini token refill in ${remainingSec}s. Using Free Fallback Engine (${voice})...`);
+      const freeResult = await generateFreeSpeech(script, {
+        language,
+        tone,
+        gender: freeVoiceGender,
+        voice,
+        speedLabel,
+        pitchLabel,
+      });
       geminiQuotaState.fallbackCount++;
 
       return res.json({
@@ -1142,7 +1303,7 @@ app.post('/api/tts/narrate', async (req, res) => {
       });
     }
 
-    // 4. Try Gemini TTS HD (Using Custom Key if provided, or Default Key)
+    // 5. Try Gemini TTS HD (Using Custom Key if provided, or Default Key)
     try {
       const ai = getGenAI(customApiKey);
       const chunks = splitScriptIntoChunks(script, 600);
@@ -1244,13 +1405,20 @@ app.post('/api/tts/narrate', async (req, res) => {
       // If a custom API key was used and ran out of credits or was invalid:
       let customKeyNotice: string | undefined;
       if (customApiKey && (isQuotaError || isKeyAuthError)) {
-        customKeyNotice = 'Los créditos de tu clave API personalizada se han agotado o no es válida. Hemos vuelto automáticamente al motor por defecto. Puedes ingresar otra clave API en cualquier momento.';
+        customKeyNotice = 'Los créditos de tu clave API personalizada se han agotado o no es válida. Hemos conmutado automáticamente al catálogo de voces neuronales de estudio.';
       }
 
-      // AUTO-FAILOVER: Immediately fallback to Free Neural TTS with user selected gender
-      console.log(`[Auto-Failover] Initiating instant fallback to Free Neural Speech Engine (Gender: ${freeVoiceGender})...`);
+      // AUTO-FAILOVER: Immediately fallback to Free Neural TTS with user selected voice
+      console.log(`[Auto-Failover] Initiating instant fallback to Free Neural Speech Engine (Voice: ${voice})...`);
       try {
-        const freeResult = await generateFreeSpeech(script, { language, tone, gender: freeVoiceGender, voice });
+        const freeResult = await generateFreeSpeech(script, {
+          language,
+          tone,
+          gender: freeVoiceGender,
+          voice,
+          speedLabel,
+          pitchLabel,
+        });
         geminiQuotaState.fallbackCount++;
 
         return res.json({
@@ -1262,7 +1430,7 @@ app.post('/api/tts/narrate', async (req, res) => {
           tensionSummary,
           engineUsed: 'free_fallback',
           engineLabel: `Motor Neuronal Gratuito (${freeResult.voiceUsed})`,
-          quotaNotice: customKeyNotice || 'Los tokens de Google Gemini se agotaron. El audio se generó exitosamente con el Motor Neuronal Gratuito de respaldo. Puedes ingresar otra clave API para reactivar Gemini.',
+          quotaNotice: customKeyNotice || 'Los tokens de Google Gemini se agotaron. El audio se generó exitosamente con el Motor Neuronal Gratuito de respaldo.',
           customKeyNotice,
           customKeyExhausted: Boolean(customApiKey && (isQuotaError || isKeyAuthError)),
           cooldownRemainingSec: 60,
@@ -1300,12 +1468,82 @@ app.post('/api/tts/refine', async (req, res) => {
     } = req.body;
 
     const customApiKey = ((req.headers['x-gemini-api-key'] as string) || (req.body?.customApiKey as string))?.trim();
+    const declaredProvider = (currentSettings?.customApiProvider as string)?.trim();
+    const provider = detectKeyProvider(customApiKey, declaredProvider);
 
     if (!originalScript || !userFeedback) {
       return res.status(400).json({ error: 'Guión original y mensaje de corrección son requeridos.' });
     }
 
     const freeGender = currentSettings?.freeVoiceGender || 'auto';
+    const voiceToUse = currentSettings?.voice || 'Kore';
+
+    // 1. Groq Refinement
+    if (provider === 'groq' && customApiKey) {
+      try {
+        const groqRefinePrompt = `Eres un Director de Doblaje y Locución Profesional.
+El usuario ha escuchado una narración generada y ha solicitado correcciones específicas.
+
+GUIÓN ORIGINAL:
+"""
+${originalScript.slice(0, 3000)}
+"""
+
+CONFIGURACIÓN PREVIA:
+- Voz: ${voiceToUse}
+- Tono: ${currentSettings?.tone || 'locutor_clasico'}
+- Velocidad: ${currentSettings?.speedLabel || 'normal'}
+- Tono/Pitch: ${currentSettings?.pitchLabel || 'neutro'}
+
+PROBLEMA / CORRECCIÓN SOLICITADA POR EL USUARIO:
+"""
+${userFeedback}
+"""
+
+Analiza exactamente qué le desagradó al usuario y cómo corregirlo de forma precisa.
+Devuelve un JSON estrictamente válido con:
+1. "refinedInstructions": Indicación clara y concisa para el locutor.
+2. "modificationsSummary": Explicación al usuario de qué cambios se aplicaron.
+3. "suggestedTone": Tono ajustado ('locutor_clasico', 'dramatico', 'epico', 'documental', 'entusiasta', 'misterio', 'calido', 'noticiero').
+4. "suggestedSpeed": Velocidad ajustada ('muy_lento', 'lento', 'normal', 'rapido', 'muy_rapido').
+5. "suggestedPitch": Tono de voz ajustado ('muy_grave', 'grave', 'neutro', 'agudo', 'muy_agudo').`;
+
+        const groqJsonStr = await callGroqChat(customApiKey, groqRefinePrompt, true);
+        const parsedPlan = JSON.parse(groqJsonStr || '{}');
+        const refinedInstructions = parsedPlan.refinedInstructions || userFeedback;
+        const modificationsSummary = parsedPlan.modificationsSummary || `Ajuste aplicado según indicación: "${userFeedback}"`;
+        const toneToUse = parsedPlan.suggestedTone || currentSettings?.tone || 'locutor_clasico';
+        const speedToUse = parsedPlan.suggestedSpeed || currentSettings?.speedLabel || 'normal';
+        const pitchToUse = parsedPlan.suggestedPitch || currentSettings?.pitchLabel || 'neutro';
+
+        const freeResult = await generateFreeSpeech(originalScript, {
+          language: currentSettings?.language || 'es',
+          tone: toneToUse,
+          gender: freeGender,
+          voice: voiceToUse,
+          speedLabel: speedToUse,
+          pitchLabel: pitchToUse,
+        });
+
+        return res.json({
+          success: true,
+          audioWavBase64: freeResult.buffer.toString('base64'),
+          audioDurationSec: freeResult.durationSec,
+          refinedInstructions,
+          modificationsSummary,
+          adjustedSettings: {
+            tone: toneToUse,
+            speedLabel: speedToUse,
+            pitchLabel: pitchToUse,
+          },
+          engineUsed: 'groq_neural',
+          tensionSummary: `Versión corregida por Groq LPU: "${userFeedback}"`,
+        });
+      } catch (groqRefineErr) {
+        console.warn('Groq refinement fallback:', groqRefineErr);
+      }
+    }
+
     const { inCooldown, remainingSec } = checkGeminiCooldown();
 
     // If Gemini is in cooldown AND no customApiKey supplied, handle correction via Free TTS
@@ -1315,7 +1553,9 @@ app.post('/api/tts/refine', async (req, res) => {
         language: currentSettings?.language || 'es',
         tone: currentSettings?.tone,
         gender: freeGender,
-        voice: currentSettings?.voice,
+        voice: voiceToUse,
+        speedLabel: currentSettings?.speedLabel || 'normal',
+        pitchLabel: currentSettings?.pitchLabel || 'neutro',
       });
 
       return res.json({
@@ -1347,7 +1587,7 @@ ${originalScript.slice(0, 3000)}
 """
 
 CONFIGURACIÓN PREVIA:
-- Voz: ${currentSettings?.voice || 'Kore'}
+- Voz: ${voiceToUse}
 - Tono: ${currentSettings?.tone || 'locutor_clasico'}
 - Velocidad: ${currentSettings?.speedLabel || 'normal'}
 - Tono/Pitch: ${currentSettings?.pitchLabel || 'neutro'}
@@ -1390,7 +1630,6 @@ Devuelve un JSON con:
       const toneToUse = parsedPlan.suggestedTone || currentSettings?.tone || 'locutor_clasico';
       const speedToUse = parsedPlan.suggestedSpeed || currentSettings?.speedLabel || 'normal';
       const pitchToUse = parsedPlan.suggestedPitch || currentSettings?.pitchLabel || 'neutro';
-      const voiceToUse = currentSettings?.voice || 'Kore';
 
       // 2. Re-synthesize audio with Gemini TTS
       const chunks = splitScriptIntoChunks(originalScript, 600);
@@ -1466,7 +1705,9 @@ Devuelve un JSON con:
         language: currentSettings?.language || 'es',
         tone: currentSettings?.tone,
         gender: freeGender,
-        voice: currentSettings?.voice,
+        voice: voiceToUse,
+        speedLabel: currentSettings?.speedLabel || 'normal',
+        pitchLabel: currentSettings?.pitchLabel || 'neutro',
       });
 
       return res.json({

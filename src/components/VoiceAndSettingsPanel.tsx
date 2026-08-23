@@ -79,6 +79,7 @@ export const VoiceAndSettingsPanel: React.FC<VoiceAndSettingsPanelProps> = ({
         body: JSON.stringify({
           voice: voiceId,
           customApiKey: settings.customApiKey,
+          customApiProvider: settings.customApiProvider,
         }),
       });
 

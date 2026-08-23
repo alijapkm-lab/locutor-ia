@@ -126,7 +126,7 @@ export default function App() {
             'Content-Type': 'application/json',
             ...(customApiKey ? { 'x-gemini-api-key': customApiKey } : {}),
           },
-          body: JSON.stringify({ script, customApiKey }),
+          body: JSON.stringify({ script, customApiKey, customApiProvider }),
         });
         if (res.ok) {
           const data = await res.json();
