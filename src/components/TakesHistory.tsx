@@ -50,7 +50,11 @@ export const TakesHistory: React.FC<TakesHistoryProps> = ({
                   <span className="text-xs font-bold text-white">
                     Toma #{takes.length - index}
                   </span>
-                  {isCorrected ? (
+                  {take.isPartial ? (
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/25 text-amber-300 border border-amber-500/40 font-semibold flex items-center gap-0.5">
+                      Parcial
+                    </span>
+                  ) : isCorrected ? (
                     <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold flex items-center gap-0.5">
                       <Wand2 className="w-2.5 h-2.5" />
                       Corregida

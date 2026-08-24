@@ -99,6 +99,9 @@ export interface NarrationResult {
   audioDurationSec: number;
   settings: NarrationSettings;
   chunksProcessed: number;
+  totalChunks?: number;
+  isPartial?: boolean;
+  isHybrid?: boolean;
   tensionDetected: boolean;
   tensionSummary?: string;
   engineUsed: 'gemini_tts' | 'free_fallback';

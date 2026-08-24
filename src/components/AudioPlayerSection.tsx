@@ -357,17 +357,29 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
               {/* Engine Badge */}
               <span
                 className={`text-[11px] px-2 py-0.5 rounded-full font-medium flex items-center gap-1 border ${
-                  result.engineUsed === 'free_fallback'
+                  result.isPartial
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    : result.isHybrid
+                    ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                    : result.engineUsed === 'free_fallback'
                     ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
                     : 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30'
                 }`}
               >
-                {result.engineUsed === 'free_fallback' ? (
+                {result.isPartial ? (
+                  <Zap className="w-3 h-3 text-amber-400" />
+                ) : result.isHybrid ? (
+                  <Sparkles className="w-3 h-3 text-cyan-400" />
+                ) : result.engineUsed === 'free_fallback' ? (
                   <Zap className="w-3 h-3 text-amber-400" />
                 ) : (
                   <Sparkles className="w-3 h-3 text-indigo-400" />
                 )}
-                {result.engineLabel || (result.engineUsed === 'free_fallback' ? 'Motor Gratuito' : 'Google Gemini HD')}
+                {result.isPartial
+                  ? `Parcial (${result.chunksProcessed}/${result.totalChunks || result.chunksProcessed} partes)`
+                  : result.isHybrid
+                  ? 'Híbrido (Gemini HD + Neuronal)'
+                  : result.engineLabel || (result.engineUsed === 'free_fallback' ? 'Motor Gratuito' : 'Google Gemini HD')}
               </span>
               {result.tensionDetected && (
                 <span className="text-[11px] px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 font-medium flex items-center gap-1">
@@ -393,12 +405,34 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
         </button>
       </div>
 
-      {/* Quota Failover Notice Banner if applicable */}
-      {result.quotaNotice && (
+      {/* Partial / Quota Failover Notice Banner if applicable */}
+      {result.isPartial && (
+        <div className="p-3.5 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs flex items-start gap-3 shadow-lg shadow-amber-950/20">
+          <Zap className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-amber-300 uppercase tracking-wider text-[10px] bg-amber-500/20 px-2 py-0.5 rounded border border-amber-500/30">
+                Producción Parcial por Límite de Tokens
+              </span>
+              <span className="text-[11px] text-amber-300 font-mono">
+                {formatTime(duration)} generados
+              </span>
+            </div>
+            <p className="text-xs text-amber-100/90 leading-relaxed">
+              {result.quotaNotice ||
+                `Tus tokens de Google Gemini se agotaron tras generar los primeros ${formatTime(duration)} de locución. El audio producido está listo para reproducir y descargar.`}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {!result.isPartial && result.quotaNotice && (
         <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-start gap-2.5">
           <Zap className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
           <div className="space-y-0.5">
-            <span className="font-bold text-amber-300">Aviso de Motor de Respaldo:</span>
+            <span className="font-bold text-amber-300">
+              {result.isHybrid ? 'Conmutación Inteligente Híbrida:' : 'Aviso de Motor de Respaldo:'}
+            </span>
             <p className="text-[11px] text-amber-200/90 leading-relaxed">{result.quotaNotice}</p>
           </div>
         </div>

@@ -2,12 +2,45 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import JSZip from 'jszip';
+import { spawn } from 'child_process';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { Communicate } from 'edge-tts-universal';
 import dotenv from 'dotenv';
 
 dotenv.config();
+
+/**
+ * High-performance streaming audio converter:
+ * Converts any audio buffer (MP3, WAV, OGG) to 24000Hz 16-bit Mono raw PCM via FFmpeg
+ */
+function convertAudioToPCM24k(inputBuffer: Buffer): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', [
+      '-i', 'pipe:0',
+      '-f', 's16le',
+      '-acodec', 'pcm_s16le',
+      '-ar', '24000',
+      '-ac', '1',
+      'pipe:1',
+    ]);
+    const chunks: Buffer[] = [];
+    proc.stdout.on('data', (d) => chunks.push(d));
+    proc.stderr.on('data', () => {}); // silence stderr
+    proc.on('close', (code) => {
+      if (code === 0) {
+        resolve(Buffer.concat(chunks));
+      } else {
+        reject(new Error(`ffmpeg conversion exited with code ${code}`));
+      }
+    });
+    proc.on('error', (err) => {
+      reject(err);
+    });
+    proc.stdin.write(inputBuffer);
+    proc.stdin.end();
+  });
+}
 
 const app = express();
 const PORT = 3000;
@@ -1304,12 +1337,15 @@ app.post('/api/tts/narrate', async (req, res) => {
     }
 
     // 5. Try Gemini TTS HD (Using Custom Key if provided, or Default Key)
+    const chunks = splitScriptIntoChunks(script, 600);
+    console.log(`Processing script (${script.length} chars) into ${chunks.length} chunks with Gemini TTS (Key: ${customApiKey ? 'custom' : 'default'}), voice: ${voice}, tone: ${tone}`);
+
+    const pcmBuffers: Buffer[] = [];
+    let failedAtChunkIndex = -1;
+    let quotaErrorDetails: any = null;
+
     try {
       const ai = getGenAI(customApiKey);
-      const chunks = splitScriptIntoChunks(script, 600);
-      console.log(`Processing script (${script.length} chars) into ${chunks.length} chunks with Gemini TTS (Key: ${customApiKey ? 'custom' : 'default'}), voice: ${voice}, tone: ${tone}`);
-
-      const pcmBuffers: Buffer[] = [];
 
       for (let i = 0; i < chunks.length; i++) {
         const chunkText = chunks[i];
@@ -1321,97 +1357,134 @@ app.post('/api/tts/narrate', async (req, res) => {
           customInstructions,
         });
 
-        const ttsResponse = await ai.models.generateContent({
-          model: 'gemini-3.1-flash-tts-preview',
-          contents: [{ parts: [{ text: prompt }] }],
-          config: {
-            responseModalities: [Modality.AUDIO],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: voice,
+        try {
+          const ttsResponse = await ai.models.generateContent({
+            model: 'gemini-3.1-flash-tts-preview',
+            contents: [{ parts: [{ text: prompt }] }],
+            config: {
+              responseModalities: [Modality.AUDIO],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: voice,
+                  },
                 },
               },
             },
-          },
-        });
+          });
 
-        const audioBase64 = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (audioBase64) {
-          const chunkBuf = Buffer.from(audioBase64, 'base64');
-          pcmBuffers.push(chunkBuf);
+          const audioBase64 = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+          if (audioBase64) {
+            const chunkBuf = Buffer.from(audioBase64, 'base64');
+            pcmBuffers.push(chunkBuf);
 
-          // Add a natural 150ms pause between paragraph chunks
-          if (i < chunks.length - 1) {
-            pcmBuffers.push(Buffer.alloc(Math.floor(24000 * 2 * 0.15)));
+            // Add a natural 150ms pause between paragraph chunks
+            if (i < chunks.length - 1) {
+              pcmBuffers.push(Buffer.alloc(Math.floor(24000 * 2 * 0.15)));
+            }
           }
+        } catch (chunkErr: any) {
+          console.warn(`[Gemini TTS] Chunk ${i + 1}/${chunks.length} hit error:`, chunkErr?.message || chunkErr);
+          failedAtChunkIndex = i;
+          quotaErrorDetails = chunkErr;
+          break; // Exit loop to handle partial / hybrid failover
         }
       }
+    } catch (clientInitErr: any) {
+      console.warn('[Gemini TTS] Client initialization error:', clientInitErr);
+      failedAtChunkIndex = 0;
+      quotaErrorDetails = clientInitErr;
+    }
 
-      if (pcmBuffers.length === 0) {
-        throw new Error('No se recibieron datos de audio del modelo Gemini TTS.');
-      }
-
+    // CASE 1: All chunks generated successfully with Gemini TTS HD
+    if (failedAtChunkIndex === -1 && pcmBuffers.length > 0) {
       const combinedPcm = Buffer.concat(pcmBuffers);
       const wavBuffer = createWavFromPCM(combinedPcm, 24000, 1);
       const durationSec = Math.round(combinedPcm.length / (24000 * 2));
-
       geminiQuotaState.geminiCount++;
 
       return res.json({
         success: true,
+        isPartial: false,
         audioWavBase64: wavBuffer.toString('base64'),
         audioDurationSec: durationSec,
         chunksProcessed: chunks.length,
+        totalChunks: chunks.length,
         tensionDetected: isTense,
         tensionSummary,
         engineUsed: 'gemini_tts',
         engineLabel: customApiKey ? 'Google Gemini 3.1 Flash TTS HD (Tu Clave API)' : 'Google Gemini 3.1 Flash TTS HD',
       });
-    } catch (geminiErr: any) {
-      console.error('Gemini TTS error encountered:', geminiErr);
+    }
 
-      const isQuotaError =
-        geminiErr.status === 429 ||
-        geminiErr.status === 503 ||
-        geminiErr.message?.includes('503') ||
-        geminiErr.message?.includes('UNAVAILABLE') ||
-        geminiErr.message?.includes('high demand') ||
-        geminiErr.message?.includes('429') ||
-        geminiErr.message?.includes('RESOURCE_EXHAUSTED') ||
-        geminiErr.message?.includes('quota') ||
-        geminiErr.message?.includes('Quota') ||
-        geminiErr.message?.includes('limit');
+    // CASE 2 & 3: Gemini TTS was interrupted mid-stream or failed due to quota/tokens/rate limit
+    const isQuotaError =
+      quotaErrorDetails?.status === 429 ||
+      quotaErrorDetails?.status === 503 ||
+      quotaErrorDetails?.message?.includes('503') ||
+      quotaErrorDetails?.message?.includes('UNAVAILABLE') ||
+      quotaErrorDetails?.message?.includes('high demand') ||
+      quotaErrorDetails?.message?.includes('429') ||
+      quotaErrorDetails?.message?.includes('RESOURCE_EXHAUSTED') ||
+      quotaErrorDetails?.message?.includes('quota') ||
+      quotaErrorDetails?.message?.includes('Quota') ||
+      quotaErrorDetails?.message?.includes('limit');
 
-      const isKeyAuthError =
-        geminiErr.status === 400 ||
-        geminiErr.status === 403 ||
-        geminiErr.message?.includes('API_KEY_INVALID') ||
-        geminiErr.message?.includes('API key');
+    const isKeyAuthError =
+      quotaErrorDetails?.status === 400 ||
+      quotaErrorDetails?.status === 403 ||
+      quotaErrorDetails?.message?.includes('API_KEY_INVALID') ||
+      quotaErrorDetails?.message?.includes('API key');
 
-      if (!customApiKey && isQuotaError) {
-        markGeminiQuotaExhausted(geminiErr.message || 'Límite de cuota alcanzado', 60);
-      }
+    if (!customApiKey && isQuotaError) {
+      markGeminiQuotaExhausted(quotaErrorDetails?.message || 'Límite de cuota alcanzado', 60);
+    }
 
-      if (engineMode === 'gemini_only' && isQuotaError) {
+    // SUB-CASE 2A: User explicitly requested 'gemini_only' mode
+    if (engineMode === 'gemini_only') {
+      // If some humanoid audio chunks were generated before tokens ran out, DELIVER THE PARTIAL AUDIO!
+      if (pcmBuffers.length > 0) {
+        const combinedPcm = Buffer.concat(pcmBuffers);
+        const wavBuffer = createWavFromPCM(combinedPcm, 24000, 1);
+        const durationSec = Math.round(combinedPcm.length / (24000 * 2));
+        const mins = Math.floor(durationSec / 60);
+        const secs = durationSec % 60;
+        const timeFormatted = mins > 0 ? `${mins}m ${secs}s` : `${secs} segundos`;
+
+        return res.json({
+          success: true,
+          isPartial: true,
+          audioWavBase64: wavBuffer.toString('base64'),
+          audioDurationSec: durationSec,
+          chunksProcessed: failedAtChunkIndex,
+          totalChunks: chunks.length,
+          tensionDetected: isTense,
+          tensionSummary: `Locución parcial con voz humanoide (${timeFormatted} generados de ${chunks.length} partes).`,
+          engineUsed: 'gemini_tts',
+          engineLabel: 'Google Gemini HD (Parcial - Tokens Agotados)',
+          quotaNotice: `⚠️ Tus tokens de Google Gemini se agotaron tras generar los primeros ${timeFormatted} de locución (${failedAtChunkIndex} de ${chunks.length} partes). Hemos conservado y entregado todo el audio producido. Puedes descargar esta parte, activar el modo 'Auto' para completar el resto con el motor gratuito, o ingresar otra clave API.`,
+          isQuotaExhausted: true,
+          customKeyExhausted: Boolean(customApiKey && (isQuotaError || isKeyAuthError)),
+          cooldownRemainingSec: 60,
+        });
+      } else {
         return res.status(429).json({
-          error: 'Tokens de Google Gemini agotados. Cambia a modo Auto o ingresa otra clave API para continuar.',
+          error: 'Tokens de Google Gemini agotados antes de iniciar la generación. Cambia a modo Auto para usar el motor de respaldo gratuito o ingresa otra clave API.',
           isQuotaExhausted: true,
           customKeyExhausted: Boolean(customApiKey),
           cooldownRemainingSec: 60,
         });
       }
+    }
 
-      // If a custom API key was used and ran out of credits or was invalid:
-      let customKeyNotice: string | undefined;
-      if (customApiKey && (isQuotaError || isKeyAuthError)) {
-        customKeyNotice = 'Los créditos de tu clave API personalizada se han agotado o no es válida. Hemos conmutado automáticamente al catálogo de voces neuronales de estudio.';
-      }
+    // SUB-CASE 2B: 'auto' mode (Smart Auto-Failover)
+    // If Gemini already produced some chunks (e.g. 3 of 6), seamlessly complete the REMAINING chunks with Free TTS and STITCH together!
+    if (pcmBuffers.length > 0 && failedAtChunkIndex > 0) {
+      console.log(`[Auto-Failover Hybrid] Gemini synthesized ${failedAtChunkIndex}/${chunks.length} chunks. Completing remaining ${chunks.length - failedAtChunkIndex} chunks with Free Neural TTS...`);
+      const remainingScript = chunks.slice(failedAtChunkIndex).join('\n\n');
 
-      // AUTO-FAILOVER: Immediately fallback to Free Neural TTS with user selected voice
-      console.log(`[Auto-Failover] Initiating instant fallback to Free Neural Speech Engine (Voice: ${voice})...`);
       try {
-        const freeResult = await generateFreeSpeech(script, {
+        const freeRemaining = await generateFreeSpeech(remainingScript, {
           language,
           tone,
           gender: freeVoiceGender,
@@ -1419,38 +1492,82 @@ app.post('/api/tts/narrate', async (req, res) => {
           speedLabel,
           pitchLabel,
         });
+
+        // Convert the remaining Free TTS audio to 24000Hz PCM
+        const remainingPcm = await convertAudioToPCM24k(freeRemaining.buffer);
+        const transitionPause = Buffer.alloc(Math.floor(24000 * 2 * 0.15));
+        const fullPcm = Buffer.concat([...pcmBuffers, transitionPause, remainingPcm]);
+        const fullWavBuffer = createWavFromPCM(fullPcm, 24000, 1);
+        const totalDurationSec = Math.round(fullPcm.length / (24000 * 2));
         geminiQuotaState.fallbackCount++;
+
+        const minsGemini = Math.floor(Math.round(Buffer.concat(pcmBuffers).length / (24000 * 2)) / 60);
+        const secsGemini = Math.round(Buffer.concat(pcmBuffers).length / (24000 * 2)) % 60;
+        const geminiTime = minsGemini > 0 ? `${minsGemini}m ${secsGemini}s` : `${secsGemini}s`;
 
         return res.json({
           success: true,
-          audioWavBase64: freeResult.buffer.toString('base64'),
-          audioDurationSec: freeResult.durationSec,
-          chunksProcessed: 1,
+          isPartial: false,
+          isHybrid: true,
+          audioWavBase64: fullWavBuffer.toString('base64'),
+          audioDurationSec: totalDurationSec,
+          chunksProcessed: chunks.length,
+          totalChunks: chunks.length,
           tensionDetected: isTense,
-          tensionSummary,
-          engineUsed: 'free_fallback',
-          engineLabel: `Motor Neuronal Gratuito (${freeResult.voiceUsed})`,
-          quotaNotice: customKeyNotice || 'Los tokens de Google Gemini se agotaron. El audio se generó exitosamente con el Motor Neuronal Gratuito de respaldo.',
-          customKeyNotice,
-          customKeyExhausted: Boolean(customApiKey && (isQuotaError || isKeyAuthError)),
+          tensionSummary: `Locución completa híbrida: ${failedAtChunkIndex} partes con Gemini HD (${geminiTime}) + ${chunks.length - failedAtChunkIndex} partes completadas con Motor Neuronal.`,
+          engineUsed: 'gemini_tts',
+          engineLabel: `Híbrido (Gemini HD + Motor Neuronal ${voice})`,
+          quotaNotice: `Conmutación inteligente exitosa: Los tokens de Gemini se agotaron tras ${geminiTime} de audio. Los fragmentos restantes (${chunks.length - failedAtChunkIndex} de ${chunks.length}) se completaron automáticamente con el Motor Neuronal de Estudio para entregarte el guión completo sin cortes.`,
           cooldownRemainingSec: 60,
         });
-      } catch (fallbackErr: any) {
-        console.error('Fallback engine also encountered an issue, generating synthetic audio:', fallbackErr);
-        const synthWav = createSyntheticWavFallback(Math.max(3, Math.round(script.length / 25)));
-        return res.json({
-          success: true,
-          audioWavBase64: synthWav.toString('base64'),
-          audioDurationSec: Math.max(3, Math.round(script.length / 25)),
-          chunksProcessed: 1,
-          tensionDetected: isTense,
-          tensionSummary,
-          engineUsed: 'free_fallback',
-          engineLabel: 'Motor Neuronal de Respaldo',
-          quotaNotice: 'Tokens de Google agotados temporalmente. Audio generado con motor de respaldo.',
-          cooldownRemainingSec: 60,
-        });
+      } catch (hybridErr) {
+        console.warn('[Auto-Failover Hybrid] Error joining audio, falling back to full free generation:', hybridErr);
       }
+    }
+
+    // If 0 chunks succeeded with Gemini (or hybrid stitching failed), synthesize full script with Free Neural TTS
+    console.log(`[Auto-Failover] Synthesizing full script with Free Neural Speech Engine (Voice: ${voice})...`);
+    try {
+      const freeResult = await generateFreeSpeech(script, {
+        language,
+        tone,
+        gender: freeVoiceGender,
+        voice,
+        speedLabel,
+        pitchLabel,
+      });
+      geminiQuotaState.fallbackCount++;
+
+      return res.json({
+        success: true,
+        isPartial: false,
+        audioWavBase64: freeResult.buffer.toString('base64'),
+        audioDurationSec: freeResult.durationSec,
+        chunksProcessed: 1,
+        totalChunks: chunks.length,
+        tensionDetected: isTense,
+        tensionSummary,
+        engineUsed: 'free_fallback',
+        engineLabel: `Motor Neuronal Gratuito (${freeResult.voiceUsed})`,
+        quotaNotice: 'Los tokens de Google Gemini se agotaron. El audio se generó exitosamente con el Motor Neuronal Gratuito de respaldo.',
+        cooldownRemainingSec: 60,
+      });
+    } catch (fallbackErr: any) {
+      console.error('Fallback engine error, generating synthetic audio:', fallbackErr);
+      const synthWav = createSyntheticWavFallback(Math.max(3, Math.round(script.length / 25)));
+      return res.json({
+        success: true,
+        isPartial: false,
+        audioWavBase64: synthWav.toString('base64'),
+        audioDurationSec: Math.max(3, Math.round(script.length / 25)),
+        chunksProcessed: 1,
+        tensionDetected: isTense,
+        tensionSummary,
+        engineUsed: 'free_fallback',
+        engineLabel: 'Motor Neuronal de Respaldo',
+        quotaNotice: 'Tokens de Google agotados temporalmente. Audio generado con motor de respaldo.',
+        cooldownRemainingSec: 60,
+      });
     }
   } catch (err: any) {
     console.error('Error in /api/tts/narrate:', err);
@@ -1781,7 +1898,10 @@ app.post('/api/music/generate', async (req, res) => {
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR !== 'true',
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
