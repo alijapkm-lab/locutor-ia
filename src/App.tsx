@@ -10,7 +10,8 @@ import { ApiKeyModal } from './components/ApiKeyModal';
 import { DownloadAppModal } from './components/DownloadAppModal';
 import { TakesHistory } from './components/TakesHistory';
 import { SAMPLE_SCRIPTS } from './data/voicesAndTones';
-import { NarrationResult, NarrationSettings, QuotaStatus, EngineMode, ApiProvider } from './types';
+import { NarrationResult, NarrationSettings, QuotaStatus, EngineMode, ApiProvider, DetectedSFX } from './types';
+import { detectSoundEffectsInScript } from './utils/sfxDetector';
 import { Mic2, Sparkles, AlertCircle, Wand2, Zap, Key, Info } from 'lucide-react';
 
 export default function App() {
@@ -48,11 +49,21 @@ export default function App() {
     tensionMusicEnabled: true,
     tensionMusicStyle: 'cinematic_suspense',
     musicVolume: 0.22,
+    sfxEnabled: true,
+    sfxVolume: 0.35,
     engineMode: 'auto',
     freeVoiceGender: 'auto',
     customApiKey: customApiKey || undefined,
     customApiProvider,
   });
+
+  // Sound effects detected in current script
+  const [sfxList, setSfxList] = useState<DetectedSFX[]>(() => detectSoundEffectsInScript(SAMPLE_SCRIPTS[0].text));
+
+  // Update SFX list when script changes
+  useEffect(() => {
+    setSfxList(detectSoundEffectsInScript(script));
+  }, [script]);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [isCorrectionOpen, setIsCorrectionOpen] = useState(false);
@@ -208,6 +219,7 @@ export default function App() {
         engineUsed: data.engineUsed || 'gemini_tts',
         engineLabel: data.engineLabel,
         quotaNotice: data.quotaNotice,
+        sfxEvents: sfxList.filter((s) => s.enabled),
       };
 
       setCurrentResult(newTake);
@@ -367,6 +379,8 @@ export default function App() {
               isGenerating={isGenerating}
               tensionScore={scriptAnalysis?.tensionScore}
               detectedGenre={scriptAnalysis?.detectedGenre}
+              detectedSFX={sfxList}
+              sfxEnabled={settings.sfxEnabled ?? true}
             />
 
             {/* Primary Action Button */}
@@ -402,11 +416,13 @@ export default function App() {
             </div>
           </div>
 
-          {/* Right / Bottom (Voice, Tone, Speed, Pitch & Tension Controls) */}
+          {/* Right / Bottom (Voice, Tone, Speed, Pitch, Tension & SFX Controls) */}
           <div className="lg:col-span-6">
             <VoiceAndSettingsPanel
               settings={{ ...settings, customApiKey }}
               onChange={(updated) => setSettings((prev) => ({ ...prev, ...updated }))}
+              sfxList={sfxList}
+              onChangeSFXList={setSfxList}
               disabled={isGenerating}
             />
           </div>

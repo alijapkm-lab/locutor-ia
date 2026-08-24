@@ -53,6 +53,57 @@ export type TensionMusicStyle =
   | 'ambient_tension'
   | 'none';
 
+export type SoundEffectId =
+  | 'rain'
+  | 'wind'
+  | 'thunder'
+  | 'sword_clash'
+  | 'explosion'
+  | 'punch_impact'
+  | 'scream'
+  | 'creaking_door'
+  | 'whoosh';
+
+export type SFXCategory = 'clima' | 'accion' | 'suspenso' | 'voces' | 'cinematico';
+
+export interface SoundEffectDefinition {
+  id: SoundEffectId;
+  name: string;
+  category: SFXCategory;
+  description: string;
+  icon: string;
+  defaultVolume: number;
+  durationSec: number;
+  keywords: string[];
+  pattern: RegExp;
+  contextTriggers?: string[]; // Positive contextual clues (e.g. ['tormenta', 'lluvia', 'cielo'])
+  negativeKeywords?: string[]; // Contextual exclusions (e.g. ['láser', 'nave', 'sol', 'luz'])
+  antiMetaphors?: string[]; // Metaphorical phrases to ignore (e.g. ['a la velocidad del rayo', 'rayo de sol'])
+  audioUrl?: string; // Direct URL to free open-access CC0 audio recording
+  sourceName?: string; // e.g. 'Wikimedia Commons CC0', 'Free Open Archive'
+  licenseType?: string; // e.g. 'Dominio Público (CC0)'
+  isRealSample?: boolean;
+}
+
+export interface DetectedSFX {
+  id: string;
+  effectId: SoundEffectId;
+  name: string;
+  category: SFXCategory;
+  timestampSec: number;
+  matchedText: string;
+  enabled: boolean;
+  volume: number; // 0.0 to 1.0
+  icon: string;
+  description: string;
+  contextReason?: string; // Human explanation of contextual detection (e.g. "Contexto: Tormenta y Lluvia")
+  contextConfidence?: number; // 0 to 100
+  audioUrl?: string;
+  sourceName?: string;
+  licenseType?: string;
+  isRealSample?: boolean;
+}
+
 export interface ScriptAnalysis {
   wordCount: number;
   estimatedMinutes: number;
@@ -60,6 +111,7 @@ export interface ScriptAnalysis {
   tensionScore: number; // 0 to 100
   tensionMoments: string[];
   detectedGenre: string;
+  detectedSFX?: DetectedSFX[];
 }
 
 export type FreeVoiceGender = 'auto' | 'male' | 'female';
@@ -84,6 +136,9 @@ export interface NarrationSettings {
   tensionMusicEnabled: boolean;
   tensionMusicStyle: TensionMusicStyle;
   musicVolume: number; // 0.0 to 1.0 (default 0.20)
+  sfxEnabled?: boolean;
+  sfxVolume?: number; // 0.0 to 1.0 (default 0.35)
+  detectedSFXList?: DetectedSFX[];
   engineMode?: EngineMode;
   freeVoiceGender?: FreeVoiceGender;
   customInstructions?: string;
@@ -109,6 +164,7 @@ export interface NarrationResult {
   quotaNotice?: string;
   customKeyNotice?: string;
   musicAudioBase64?: string;
+  sfxEvents?: DetectedSFX[];
   correctionHistory?: {
     feedback: string;
     appliedAdjustments: string;

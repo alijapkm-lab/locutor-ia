@@ -1,7 +1,9 @@
-import React from 'react';
-import { FileText, Clock, Sparkles, Trash2, Copy, Check, Flame } from 'lucide-react';
+import React, { useMemo } from 'react';
+import { FileText, Clock, Sparkles, Trash2, Copy, Check, Flame, Zap } from 'lucide-react';
 import { SAMPLE_SCRIPTS } from '../data/voicesAndTones';
-import { EmotionalTone, VoiceId } from '../types';
+import { EmotionalTone, VoiceId, DetectedSFX } from '../types';
+import { detectSoundEffectsInScript } from '../utils/sfxDetector';
+import { formatTime } from '../utils/audioUtils';
 
 interface ScriptInputAreaProps {
   script: string;
@@ -10,6 +12,8 @@ interface ScriptInputAreaProps {
   isGenerating: boolean;
   tensionScore?: number;
   detectedGenre?: string;
+  detectedSFX?: DetectedSFX[];
+  sfxEnabled?: boolean;
 }
 
 export const ScriptInputArea: React.FC<ScriptInputAreaProps> = ({
@@ -19,6 +23,8 @@ export const ScriptInputArea: React.FC<ScriptInputAreaProps> = ({
   isGenerating,
   tensionScore = 0,
   detectedGenre,
+  detectedSFX,
+  sfxEnabled = true,
 }) => {
   const [copied, setCopied] = React.useState(false);
 
@@ -27,6 +33,12 @@ export const ScriptInputArea: React.FC<ScriptInputAreaProps> = ({
   // Estimated minutes based on 135 words/min
   const estimatedMin = Math.max(0.1, Number((wordCount / 135).toFixed(1)));
   const estimatedSec = Math.round((wordCount / 135) * 60);
+
+  // Live client-side detected sound effects
+  const liveSFX = useMemo(() => {
+    if (detectedSFX && detectedSFX.length > 0) return detectedSFX;
+    return detectSoundEffectsInScript(script);
+  }, [script, detectedSFX]);
 
   const handleCopy = () => {
     if (!script) return;
@@ -106,6 +118,28 @@ export const ScriptInputArea: React.FC<ScriptInputAreaProps> = ({
           </div>
         )}
       </div>
+
+      {/* Live Detected Sound Effects Bar */}
+      {sfxEnabled && liveSFX.length > 0 && (
+        <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-2.5 flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1.5 text-amber-400 text-xs font-bold mr-1">
+            <Zap className="w-3.5 h-3.5 text-amber-400" />
+            <span>SFX Detectados ({liveSFX.length}):</span>
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {liveSFX.map((sfx) => (
+              <span
+                key={sfx.id}
+                title={sfx.contextReason ? `${sfx.name} • ${sfx.contextReason}` : sfx.description}
+                className="text-[11px] px-2 py-0.5 rounded-lg bg-[#141418] border border-amber-500/30 text-amber-200 flex items-center gap-1.5 cursor-help"
+              >
+                <span className="font-mono text-amber-400 font-bold">[{formatTime(sfx.timestampSec)}]</span>
+                <span>{sfx.name}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Footer stats & indicators */}
       <div className="flex flex-wrap items-center justify-between gap-3 pt-1 text-xs text-slate-400">

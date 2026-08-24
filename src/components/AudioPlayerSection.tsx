@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import {
   Play,
   Pause,
@@ -16,11 +16,24 @@ import {
   Clock,
   Sparkles,
   Zap,
-  Info,
+  Layers,
+  Square,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
-import { NarrationResult } from '../types';
-import { audioBufferToMp3, audioBufferToWavBlob, downloadBlob, formatTime, mixVoiceAndMusic } from '../utils/audioUtils';
+import { DetectedSFX, NarrationResult } from '../types';
+import {
+  audioBufferToMp3,
+  audioBufferToWavBlob,
+  downloadBlob,
+  formatTime,
+  mixMultiTrackAudio,
+} from '../utils/audioUtils';
 import { generateProceduralTensionTrack } from '../utils/tensionMusicGenerator';
+import { generateSoundEffectBuffer } from '../utils/sfxGenerator';
+import { detectSoundEffectsInScript } from '../utils/sfxDetector';
+import { loadAndCacheSFXBuffer, playSFXPreview } from '../utils/sfxAudioLoader';
+import { getSFXIcon } from './SoundEffectsManager';
 
 interface AudioPlayerSectionProps {
   result: NarrationResult;
@@ -37,18 +50,39 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
   const [playbackRate, setPlaybackRate] = useState(1.0);
   const [voiceVolume, setVoiceVolume] = useState(1.0);
   const [musicVolume, setMusicVolume] = useState(result.settings.musicVolume || 0.22);
+  const [sfxVolume, setSfxVolume] = useState(result.settings.sfxVolume ?? 0.35);
+  const [sfxEnabled, setSfxEnabled] = useState(result.settings.sfxEnabled ?? true);
   const [isMuted, setIsMuted] = useState(false);
+
+  // SFX Track Events in this Take
+  const initialSFX = useMemo(() => {
+    if (result.sfxEvents && result.sfxEvents.length > 0) return result.sfxEvents;
+    return detectSoundEffectsInScript(result.script);
+  }, [result]);
+
+  const [sfxList, setSfxList] = useState<DetectedSFX[]>(initialSFX);
+  const [showSfxList, setShowSfxList] = useState(true);
+  const [previewingSfxId, setPreviewingSfxId] = useState<string | null>(null);
+
+  // Export options
   const [includeMusicInExport, setIncludeMusicInExport] = useState(result.settings.tensionMusicEnabled);
+  const [includeSfxInExport, setIncludeSfxInExport] = useState(result.settings.sfxEnabled ?? true);
   const [isExporting, setIsExporting] = useState(false);
   const [exportSuccess, setExportSuccess] = useState<string | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const voiceBufferRef = useRef<AudioBuffer | null>(null);
   const musicBufferRef = useRef<AudioBuffer | null>(null);
+  const sfxBuffersCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
+
   const voiceSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const musicSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const activeSfxSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const previewSourceRef = useRef<AudioBufferSourceNode | null>(null);
+
   const voiceGainRef = useRef<GainNode | null>(null);
   const musicGainRef = useRef<GainNode | null>(null);
+  const sfxGainRef = useRef<GainNode | null>(null);
   const masterGainRef = useRef<GainNode | null>(null);
 
   const startTimeRef = useRef<number>(0);
@@ -95,6 +129,21 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
           musicBufferRef.current = null;
         }
 
+        // Pre-generate & load real open library SFX buffers in cache
+        const cache = new Map<string, AudioBuffer>();
+        for (const item of initialSFX) {
+          if (!cache.has(item.effectId)) {
+            try {
+              const buf = await loadAndCacheSFXBuffer(item.effectId, item.audioUrl, ctx);
+              cache.set(item.effectId, buf);
+            } catch (e) {
+              const buf = generateSoundEffectBuffer(ctx, item.effectId);
+              cache.set(item.effectId, buf);
+            }
+          }
+        }
+        sfxBuffersCacheRef.current = cache;
+
         drawWaveform(decodedVoice);
       } catch (err) {
         console.error('Error decoding audio:', err);
@@ -109,7 +158,7 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
     };
   }, [result]);
 
-  // Waveform visualization
+  // Waveform visualization with SFX markers
   const drawWaveform = (buffer: AudioBuffer) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -119,7 +168,6 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
     const width = canvas.width;
     const height = canvas.height;
     const data = buffer.getChannelData(0);
-    const step = Math.ceil(data.length / width);
     const amp = height / 2;
 
     ctx.clearRect(0, 0, width, height);
@@ -136,7 +184,7 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
     ctx.lineTo(width, height / 2);
     ctx.stroke();
 
-    // Bars
+    // Waveform Bars
     const barWidth = 2.5;
     const gap = 1.5;
     const numBars = Math.floor(width / (barWidth + gap));
@@ -163,6 +211,29 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
       ctx.beginPath();
       ctx.roundRect(x, y, barWidth, barHeight, 2);
       ctx.fill();
+    }
+
+    // Draw SFX marker pins on top of waveform
+    if (sfxEnabled && sfxList.length > 0 && duration > 0) {
+      for (const sfx of sfxList) {
+        if (!sfx.enabled) continue;
+        const markerX = (sfx.timestampSec / duration) * width;
+        if (markerX >= 0 && markerX <= width) {
+          // Vertical glowing line
+          ctx.strokeStyle = '#06b6d4';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(markerX, 4);
+          ctx.lineTo(markerX, height - 4);
+          ctx.stroke();
+
+          // Top pin dot
+          ctx.fillStyle = '#22d3ee';
+          ctx.beginPath();
+          ctx.arc(markerX, 6, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
     }
   };
 
@@ -205,7 +276,7 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
     masterGain.connect(ctx.destination);
     masterGainRef.current = masterGain;
 
-    // Voice node
+    // 1. Voice node
     const vGain = ctx.createGain();
     vGain.gain.value = voiceVolume;
     vGain.connect(masterGain);
@@ -218,7 +289,7 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
     vSource.start(0, startFrom);
     voiceSourceRef.current = vSource;
 
-    // Music node
+    // 2. Music node
     if (result.settings.tensionMusicEnabled && musicBufferRef.current) {
       const mGain = ctx.createGain();
       mGain.gain.value = musicVolume;
@@ -231,6 +302,43 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
       mSource.connect(mGain);
       mSource.start(0, startFrom % musicBufferRef.current.duration);
       musicSourceRef.current = mSource;
+    }
+
+    // 3. Sound Effects (SFX) nodes scheduled at relative timestamps
+    if (sfxEnabled && sfxList.length > 0) {
+      const sGain = ctx.createGain();
+      sGain.gain.value = sfxVolume;
+      sGain.connect(masterGain);
+      sfxGainRef.current = sGain;
+
+      const newSfxSources: AudioBufferSourceNode[] = [];
+
+      for (const sfx of sfxList) {
+        if (!sfx.enabled) continue;
+        const offsetSec = sfx.timestampSec - startFrom;
+        if (offsetSec >= 0) {
+          let sfxBuf = sfxBuffersCacheRef.current.get(sfx.effectId);
+          if (!sfxBuf) {
+            sfxBuf = generateSoundEffectBuffer(ctx, sfx.effectId);
+            sfxBuffersCacheRef.current.set(sfx.effectId, sfxBuf);
+          }
+
+          // Individual item gain
+          const itemGain = ctx.createGain();
+          itemGain.gain.value = sfx.volume ?? 1.0;
+          itemGain.connect(sGain);
+
+          const sfxSource = ctx.createBufferSource();
+          sfxSource.buffer = sfxBuf;
+          sfxSource.connect(itemGain);
+
+          const scheduledAudioTime = ctx.currentTime + offsetSec / playbackRate;
+          sfxSource.start(scheduledAudioTime);
+          newSfxSources.push(sfxSource);
+        }
+      }
+
+      activeSfxSourcesRef.current = newSfxSources;
     }
 
     startTimeRef.current = ctx.currentTime;
@@ -249,6 +357,11 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
       musicSourceRef.current.disconnect();
       musicSourceRef.current = null;
     }
+    for (const src of activeSfxSourcesRef.current) {
+      try { src.stop(); } catch (e) {}
+      src.disconnect();
+    }
+    activeSfxSourcesRef.current = [];
   };
 
   const stopAudio = () => {
@@ -285,26 +398,69 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
     }
   };
 
-  // Export handlers
+  // Preview individual SFX
+  const playPreviewEffect = async (effectId: string, instanceKey: string, customUrl?: string) => {
+    if (previewingSfxId === instanceKey) {
+      if (previewSourceRef.current) {
+        try { previewSourceRef.current.stop(); } catch (e) {}
+        previewSourceRef.current = null;
+      }
+      setPreviewingSfxId(null);
+      return;
+    }
+
+    try {
+      if (previewSourceRef.current) {
+        try { previewSourceRef.current.stop(); } catch (e) {}
+      }
+
+      setPreviewingSfxId(instanceKey);
+      const stopFn = await playSFXPreview(effectId as any, sfxVolume, customUrl);
+      previewSourceRef.current = { stop: stopFn } as any;
+
+      setTimeout(() => {
+        setPreviewingSfxId((prev) => (prev === instanceKey ? null : prev));
+      }, 4000);
+    } catch (err) {
+      console.warn('SFX preview failed:', err);
+      setPreviewingSfxId(null);
+    }
+  };
+
+  const handleToggleSFXItem = (id: string) => {
+    const updated = sfxList.map((item) => (item.id === id ? { ...item, enabled: !item.enabled } : item));
+    setSfxList(updated);
+    if (isPlaying) {
+      playAudio(currentTime);
+    } else if (voiceBufferRef.current) {
+      drawWaveform(voiceBufferRef.current);
+    }
+  };
+
+  const handleSFXItemVolume = (id: string, vol: number) => {
+    setSfxList(sfxList.map((item) => (item.id === id ? { ...item, volume: vol } : item)));
+  };
+
+  // Export handlers with multi-track master
   const handleDownloadMp3 = async () => {
     if (!audioCtxRef.current || !voiceBufferRef.current) return;
     setIsExporting(true);
     try {
-      let finalBuffer = voiceBufferRef.current;
-      if (includeMusicInExport && musicBufferRef.current) {
-        finalBuffer = mixVoiceAndMusic(
-          audioCtxRef.current,
-          voiceBufferRef.current,
-          musicBufferRef.current,
-          musicVolume,
-          true
-        );
-      }
+      const finalBuffer = mixMultiTrackAudio(
+        audioCtxRef.current,
+        voiceBufferRef.current,
+        includeMusicInExport ? musicBufferRef.current : null,
+        musicVolume,
+        includeSfxInExport && sfxEnabled ? sfxList.filter((s) => s.enabled) : [],
+        sfxVolume,
+        true,
+        sfxBuffersCacheRef.current
+      );
       const mp3Blob = audioBufferToMp3(finalBuffer, 256);
-      const filename = `locucion_${result.settings.voice}_${Date.now()}.mp3`;
+      const filename = `locucion_${result.settings.voice}_master_${Date.now()}.mp3`;
       downloadBlob(mp3Blob, filename);
-      setExportSuccess('MP3 descargado con alta calidad');
-      setTimeout(() => setExportSuccess(null), 3000);
+      setExportSuccess('MP3 descargado con mezcla completa (Voz + Música + SFX)');
+      setTimeout(() => setExportSuccess(null), 3500);
     } catch (err) {
       console.error('Error generating MP3:', err);
     } finally {
@@ -316,21 +472,21 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
     if (!audioCtxRef.current || !voiceBufferRef.current) return;
     setIsExporting(true);
     try {
-      let finalBuffer = voiceBufferRef.current;
-      if (includeMusicInExport && musicBufferRef.current) {
-        finalBuffer = mixVoiceAndMusic(
-          audioCtxRef.current,
-          voiceBufferRef.current,
-          musicBufferRef.current,
-          musicVolume,
-          true
-        );
-      }
+      const finalBuffer = mixMultiTrackAudio(
+        audioCtxRef.current,
+        voiceBufferRef.current,
+        includeMusicInExport ? musicBufferRef.current : null,
+        musicVolume,
+        includeSfxInExport && sfxEnabled ? sfxList.filter((s) => s.enabled) : [],
+        sfxVolume,
+        true,
+        sfxBuffersCacheRef.current
+      );
       const wavBlob = audioBufferToWavBlob(finalBuffer);
       const filename = `locucion_${result.settings.voice}_master.wav`;
       downloadBlob(wavBlob, filename);
-      setExportSuccess('WAV descargado con calidad máster');
-      setTimeout(() => setExportSuccess(null), 3000);
+      setExportSuccess('WAV descargado con calidad máster de estudio');
+      setTimeout(() => setExportSuccess(null), 3500);
     } catch (err) {
       console.error('Error generating WAV:', err);
     } finally {
@@ -387,9 +543,15 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
                   Tensión Sonora
                 </span>
               )}
+              {sfxEnabled && sfxList.length > 0 && (
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-medium flex items-center gap-1">
+                  <Zap className="w-3 h-3" />
+                  {sfxList.filter((s) => s.enabled).length} SFX Sincronizados
+                </span>
+              )}
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              {result.tensionSummary || 'Audio listo para reproducción y descarga en alta fidelidad.'}
+              {result.tensionSummary || 'Audio multipista listo para reproducción y descarga en alta fidelidad.'}
             </p>
           </div>
         </div>
@@ -438,7 +600,7 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
         </div>
       )}
 
-      {/* Waveform Canvas */}
+      {/* Waveform Canvas with SFX Marker Pins */}
       <div className="relative rounded-xl overflow-hidden bg-[#0A0A0B] border border-white/10">
         <canvas
           ref={canvasRef}
@@ -446,8 +608,14 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
           height={85}
           className="w-full h-22 block"
         />
-        <div className="absolute bottom-2 right-3 px-2 py-0.5 rounded bg-black/80 text-[10px] text-slate-400 font-mono border border-white/10">
-          24.0 kHz PCM 16-Bit
+        <div className="absolute bottom-2 right-3 px-2 py-0.5 rounded bg-black/80 text-[10px] text-slate-400 font-mono border border-white/10 flex items-center gap-2">
+          {sfxEnabled && sfxList.length > 0 && (
+            <span className="flex items-center gap-1 text-cyan-400">
+              <span className="w-2 h-2 rounded-full bg-cyan-400"></span>
+              {sfxList.filter((s) => s.enabled).length} SFX
+            </span>
+          )}
+          <span>24.0 kHz Studio Master</span>
         </div>
       </div>
 
@@ -468,7 +636,7 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
         </div>
       </div>
 
-      {/* Playback Controls and Volume */}
+      {/* Playback Controls and Multi-Track Volume Mixer */}
       <div className="flex flex-wrap items-center justify-between gap-4 pt-1">
         <div className="flex items-center gap-3">
           <button
@@ -517,8 +685,9 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
           </div>
         </div>
 
-        {/* Dual Track Mixer: Voice vs Tension Music */}
-        <div className="flex items-center gap-4 bg-[#0A0A0B] p-2.5 rounded-xl border border-white/10 text-xs">
+        {/* 3-Track Studio Mixer: Voice, Tension Music & Sound Effects */}
+        <div className="flex items-center gap-4 bg-[#0A0A0B] p-2.5 rounded-xl border border-white/10 text-xs flex-wrap">
+          {/* Voice Volume */}
           <div className="flex items-center gap-1.5 text-slate-300">
             <Volume2 className="w-3.5 h-3.5 text-amber-400" />
             <span>Voz:</span>
@@ -537,10 +706,11 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
             />
           </div>
 
+          {/* Tension Music Volume */}
           {result.settings.tensionMusicEnabled && (
             <div className="flex items-center gap-1.5 text-slate-300 border-l border-white/10 pl-3">
               <Music className="w-3.5 h-3.5 text-amber-400" />
-              <span>Música Tensión:</span>
+              <span>Música:</span>
               <input
                 type="range"
                 min="0"
@@ -556,21 +726,145 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
               />
             </div>
           )}
+
+          {/* SFX Master Volume */}
+          {sfxEnabled && sfxList.length > 0 && (
+            <div className="flex items-center gap-1.5 text-slate-300 border-l border-white/10 pl-3">
+              <Zap className="w-3.5 h-3.5 text-cyan-400" />
+              <span>SFX:</span>
+              <input
+                type="range"
+                min="0"
+                max="1.0"
+                step="0.05"
+                value={sfxVolume}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  setSfxVolume(v);
+                  if (sfxGainRef.current) sfxGainRef.current.gain.value = v;
+                }}
+                className="w-16 accent-cyan-400 cursor-pointer"
+              />
+            </div>
+          )}
         </div>
       </div>
 
+      {/* SFX Interactive Events List Accordion */}
+      {sfxList.length > 0 && (
+        <div className="bg-[#0A0A0C] border border-white/10 rounded-xl overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setShowSfxList(!showSfxList)}
+            className="w-full p-3 bg-white/[0.02] hover:bg-white/5 flex items-center justify-between text-xs font-semibold text-slate-300 transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-2">
+              <Zap className="w-4 h-4 text-cyan-400" />
+              <span>Efectos de Sonido Detectados en esta Toma ({sfxList.filter((s) => s.enabled).length} de {sfxList.length} activos)</span>
+              <span className="text-[10px] px-2 py-0.2 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                0 Tokens
+              </span>
+            </div>
+            <div className="flex items-center gap-2 text-slate-400">
+              <span className="text-[11px]">{showSfxList ? 'Ocultar' : 'Mostrar'}</span>
+              {showSfxList ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </div>
+          </button>
+
+          {showSfxList && (
+            <div className="p-3 border-t border-white/10 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 bg-[#0E0E12]">
+              {sfxList.map((item) => (
+                <div
+                  key={item.id}
+                  className={`p-2.5 rounded-lg border flex items-center justify-between gap-2 transition-all ${
+                    item.enabled
+                      ? 'bg-[#15151A] border-cyan-500/30'
+                      : 'bg-[#111114]/60 border-white/5 opacity-50'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => playPreviewEffect(item.effectId, item.id, item.audioUrl)}
+                      className={`w-7 h-7 rounded flex items-center justify-center flex-shrink-0 cursor-pointer ${
+                        previewingSfxId === item.id
+                          ? 'bg-cyan-400 text-black'
+                          : 'bg-white/5 hover:bg-cyan-500/20 text-cyan-300'
+                      }`}
+                      title="Probar sonido individual"
+                    >
+                      {previewingSfxId === item.id ? (
+                        <Square className="w-3 h-3 fill-current" />
+                      ) : (
+                        <Play className="w-3 h-3 ml-0.5" />
+                      )}
+                    </button>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1">
+                        <span className="text-[10px] font-mono text-cyan-400 font-bold">
+                          {formatTime(item.timestampSec)}
+                        </span>
+                        <span className="text-xs font-medium text-white truncate">
+                          {item.name}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-slate-400 truncate">
+                        {item.matchedText ? `"${item.matchedText}"` : item.description}
+                      </p>
+                      {item.contextReason && (
+                        <p className="text-[9px] text-cyan-400/90 font-medium truncate mt-0.5">
+                          {item.contextReason}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleSFXItem(item.id)}
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-bold cursor-pointer ${
+                        item.enabled
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                          : 'bg-white/5 text-slate-400 border border-white/10'
+                      }`}
+                    >
+                      {item.enabled ? 'ON' : 'OFF'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Export Section (MP3 & WAV) */}
       <div className="pt-4 border-t border-white/10 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={includeMusicInExport}
-              onChange={(e) => setIncludeMusicInExport(e.target.checked)}
-              className="accent-amber-500 rounded"
-            />
-            <span>Incluir mezcla de música de fondo en la descarga</span>
-          </label>
+        <div className="flex items-center gap-4 flex-wrap text-xs text-slate-300">
+          {result.settings.tensionMusicEnabled && (
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={includeMusicInExport}
+                onChange={(e) => setIncludeMusicInExport(e.target.checked)}
+                className="accent-amber-500 rounded"
+              />
+              <span>Incluir Música de Fondo</span>
+            </label>
+          )}
+
+          {sfxEnabled && sfxList.length > 0 && (
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={includeSfxInExport}
+                onChange={(e) => setIncludeSfxInExport(e.target.checked)}
+                className="accent-cyan-400 rounded"
+              />
+              <span>Incluir Efectos SFX en Master</span>
+            </label>
+          )}
         </div>
 
         <div className="flex items-center gap-2.5 flex-wrap">
@@ -588,7 +882,7 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-black text-xs font-bold transition-all shadow-md shadow-amber-950/30 active:scale-95 cursor-pointer"
           >
             <Download className="w-4 h-4" />
-            <span>Descargar MP3 (Alta Calidad)</span>
+            <span>Descargar MP3 Máster</span>
           </button>
 
           <button
@@ -598,7 +892,7 @@ export const AudioPlayerSection: React.FC<AudioPlayerSectionProps> = ({
             className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 border border-white/10 text-xs font-medium transition-all cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
-            <span>Descargar WAV</span>
+            <span>Descargar WAV (Estudio)</span>
           </button>
         </div>
       </div>

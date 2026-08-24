@@ -1,4 +1,6 @@
 import * as lamejs from 'lamejs';
+import { DetectedSFX } from '../types';
+import { generateSoundEffectBuffer } from './sfxGenerator';
 
 /**
  * Creates a standard WAV file header for 16-bit PCM audio.
@@ -164,14 +166,17 @@ export function audioBufferToWavBlob(audioBuffer: AudioBuffer): Blob {
 }
 
 /**
- * Mixes voice AudioBuffer and tension music AudioBuffer with smooth ducking
+ * Mixes voice AudioBuffer, tension music AudioBuffer, and sound effects with smooth ducking and limiter
  */
-export function mixVoiceAndMusic(
+export function mixMultiTrackAudio(
   audioCtx: AudioContext,
   voiceBuffer: AudioBuffer,
   musicBuffer: AudioBuffer | null,
   musicVolume = 0.22,
-  applyDucking = true
+  sfxList: DetectedSFX[] = [],
+  masterSfxVolume = 0.35,
+  applyDucking = true,
+  sfxBufferMap?: Map<string, AudioBuffer>
 ): AudioBuffer {
   const sampleRate = voiceBuffer.sampleRate;
   const duration = voiceBuffer.duration;
@@ -185,8 +190,33 @@ export function mixVoiceAndMusic(
   const voiceL = voiceBuffer.getChannelData(0);
   const voiceR = voiceBuffer.numberOfChannels > 1 ? voiceBuffer.getChannelData(1) : voiceL;
 
+  // Pre-render and overlay enabled sound effects into a dedicated SFX stereo track
+  const sfxTrackL = new Float32Array(numSamples);
+  const sfxTrackR = new Float32Array(numSamples);
+
+  for (const sfx of sfxList) {
+    if (!sfx.enabled) continue;
+    try {
+      const sfxBuffer = sfxBufferMap?.get(sfx.effectId) || generateSoundEffectBuffer(audioCtx, sfx.effectId);
+      const startSample = Math.floor(sfx.timestampSec * sampleRate);
+      const sfxDurationSamples = sfxBuffer.length;
+      const sfxVol = (sfx.volume ?? 0.7) * masterSfxVolume;
+
+      const sBufL = sfxBuffer.getChannelData(0);
+      const sBufR = sfxBuffer.numberOfChannels > 1 ? sfxBuffer.getChannelData(1) : sBufL;
+
+      for (let s = 0; s < sfxDurationSamples; s++) {
+        const destIdx = startSample + s;
+        if (destIdx >= numSamples) break;
+        sfxTrackL[destIdx] += (sBufL[s] || 0) * sfxVol;
+        sfxTrackR[destIdx] += (sBufR[s] || 0) * sfxVol;
+      }
+    } catch (e) {
+      console.warn('Error mixing SFX item:', sfx, e);
+    }
+  }
+
   // Compute voice envelope for ducking
-  const windowSize = Math.floor(sampleRate * 0.05); // 50ms window
   const voiceEnvelope = new Float32Array(numSamples);
   let currentEnergy = 0;
   for (let i = 0; i < numSamples; i++) {
@@ -215,12 +245,10 @@ export function mixVoiceAndMusic(
       mL = musicL[musicIdx];
       mR = musicR[musicIdx];
 
-      // Ducking logic: when voice is loud, subtly lower background music
-      // so it never overpowers the voice
+      // Ducking logic: when voice or loud SFX is playing, subtly lower background music
       let duckFactor = 1.0;
       if (applyDucking) {
         const env = Math.min(1.0, voiceEnvelope[i] * 3.5);
-        // Reduce music by up to 40% during strong speaking phrases
         duckFactor = 1.0 - env * 0.35;
       }
 
@@ -233,12 +261,28 @@ export function mixVoiceAndMusic(
       mR = mR * musicVolume * duckFactor * envelopeModifier;
     }
 
+    const sL = sfxTrackL[i] || 0;
+    const sR = sfxTrackR[i] || 0;
+
     // Mix with limiter/soft clipper
-    mixedL[i] = Math.max(-1.0, Math.min(1.0, vL + mL));
-    mixedR[i] = Math.max(-1.0, Math.min(1.0, vR + mR));
+    mixedL[i] = Math.max(-1.0, Math.min(1.0, vL + mL + sL));
+    mixedR[i] = Math.max(-1.0, Math.min(1.0, vR + mR + sR));
   }
 
   return mixedBuffer;
+}
+
+/**
+ * Mixes voice AudioBuffer and tension music AudioBuffer with smooth ducking
+ */
+export function mixVoiceAndMusic(
+  audioCtx: AudioContext,
+  voiceBuffer: AudioBuffer,
+  musicBuffer: AudioBuffer | null,
+  musicVolume = 0.22,
+  applyDucking = true
+): AudioBuffer {
+  return mixMultiTrackAudio(audioCtx, voiceBuffer, musicBuffer, musicVolume, [], 0, applyDucking);
 }
 
 /**

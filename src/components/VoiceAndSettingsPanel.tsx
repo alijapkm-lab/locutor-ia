@@ -20,17 +20,22 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { AVAILABLE_VOICES, EMOTIONAL_TONES, TENSION_MUSIC_STYLES } from '../data/voicesAndTones';
-import { EmotionalTone, NarrationSettings, TensionMusicStyle, VoiceId } from '../types';
+import { EmotionalTone, NarrationSettings, TensionMusicStyle, VoiceId, DetectedSFX } from '../types';
+import { SoundEffectsManager } from './SoundEffectsManager';
 
 interface VoiceAndSettingsPanelProps {
   settings: NarrationSettings;
   onChange: (updated: Partial<NarrationSettings>) => void;
+  sfxList?: DetectedSFX[];
+  onChangeSFXList?: (list: DetectedSFX[]) => void;
   disabled?: boolean;
 }
 
 export const VoiceAndSettingsPanel: React.FC<VoiceAndSettingsPanelProps> = ({
   settings,
   onChange,
+  sfxList = [],
+  onChangeSFXList,
   disabled = false,
 }) => {
   // Voice Preview Audio Player State
@@ -639,6 +644,18 @@ export const VoiceAndSettingsPanel: React.FC<VoiceAndSettingsPanelProps> = ({
             </div>
           </div>
         )}
+      </div>
+
+      {/* 5. EFECTOS DE SONIDO INTELIGENTES (SFX) */}
+      <div className="pt-2 border-t border-white/10">
+        <SoundEffectsManager
+          sfxList={sfxList}
+          onChangeSFXList={onChangeSFXList || (() => {})}
+          sfxEnabled={settings.sfxEnabled ?? true}
+          onToggleSFXEnabled={(enabled) => onChange({ sfxEnabled: enabled })}
+          sfxVolume={settings.sfxVolume ?? 0.35}
+          onChangeSFXVolume={(vol) => onChange({ sfxVolume: vol })}
+        />
       </div>
     </div>
   );

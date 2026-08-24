@@ -48,6 +48,9 @@ const PORT = 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Serve real sound files directly
+app.use('/sounds', express.static(path.join(process.cwd(), 'public', 'sounds')));
+
 // Lazy GoogleGenAI client with optional custom API key support
 let genAIClient: GoogleGenAI | null = null;
 function getGenAI(customKey?: string): GoogleGenAI {
@@ -1892,6 +1895,90 @@ app.post('/api/music/generate', async (req, res) => {
     console.error('Error in /api/music/generate:', err);
     res.status(500).json({ error: err.message || 'Error al generar música de fondo con IA.' });
   }
+});
+
+// Cache for proxied free audio samples to speed up repeated playback
+const sfxAudioCache = new Map<string, { buffer: Buffer; contentType: string }>();
+
+// Free Open Sound Effects Proxy Stream (Bypasses CORS restrictions and caches CC0 audio clips)
+app.get('/api/sfx/sample', async (req, res) => {
+  try {
+    const targetUrl = (req.query.url as string) || '';
+    const effectId = (req.query.id as string) || 'default';
+
+    if (!targetUrl) {
+      return res.status(400).json({ error: 'URL de audio libre requerida.' });
+    }
+
+    // Return from server cache if available
+    const cacheKey = `${effectId}_${targetUrl}`;
+    if (sfxAudioCache.has(cacheKey)) {
+      const cached = sfxAudioCache.get(cacheKey)!;
+      res.setHeader('Content-Type', cached.contentType);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.send(cached.buffer);
+    }
+
+    // Fetch from free open audio repository
+    const response = await fetch(targetUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) VoiceStudioApp/1.0',
+        'Accept': 'audio/mpeg, audio/ogg, audio/wav, audio/*;q=0.9',
+      },
+    });
+
+    if (!response.ok) {
+      return res.status(response.status).json({ error: `No se pudo descargar el audio libre (${response.statusText})` });
+    }
+
+    const contentType = response.headers.get('content-type') || (targetUrl.endsWith('.mp3') ? 'audio/mpeg' : 'audio/ogg');
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    // Store in cache (cap at 50 entries)
+    if (sfxAudioCache.size > 50) {
+      const firstKey = sfxAudioCache.keys().next().value;
+      if (firstKey) sfxAudioCache.delete(firstKey);
+    }
+    sfxAudioCache.set(cacheKey, { buffer, contentType });
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.send(buffer);
+  } catch (err: any) {
+    console.error('Error streaming free SFX sample:', err);
+    res.status(500).json({ error: err.message || 'Error al transmitir efecto de sonido libre.' });
+  }
+});
+
+// Endpoint to list free audio open repositories
+app.get('/api/sfx/libraries', (_req, res) => {
+  res.json({
+    status: 'ok',
+    repositories: [
+      {
+        id: 'wikimedia_commons',
+        name: 'Wikimedia Commons (CC0 / Dominio Público)',
+        license: 'CC0 1.0 Universal / Public Domain',
+        isFree: true,
+        commercialAllowed: true,
+      },
+      {
+        id: 'freesound_cc0',
+        name: 'Freesound Public Domain Archive',
+        license: 'Creative Commons 0',
+        isFree: true,
+        commercialAllowed: true,
+      },
+      {
+        id: 'bigsoundbank',
+        name: 'BigSoundBank (Biblioteca Libre)',
+        license: 'Royalty-Free Open Audio',
+        isFree: true,
+        commercialAllowed: true,
+      },
+    ],
+  });
 });
 
 // Vite middleware setup

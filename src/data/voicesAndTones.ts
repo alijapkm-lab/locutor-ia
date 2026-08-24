@@ -150,6 +150,14 @@ export const TENSION_MUSIC_STYLES: { id: TensionMusicStyle; name: string; desc: 
 
 export const SAMPLE_SCRIPTS = [
   {
+    title: '⚡ Tormenta y Misterio (SFX: Rayo, Puerta y Pasos)',
+    category: 'Efectos SFX',
+    tone: 'misterio' as const,
+    voice: 'Fenrir' as const,
+    text: `La lluvia azotaba los ventanales de la mansión en plena madrugada. De repente, cayó un rayo que iluminó cada rincón de la sala en penumbra.
+En ese instante, la pesada puerta de roble se abrió con un chirrido espeluznante. Unos pasos lentos comenzaron a resonar en el pasillo, acompañados por el latido desbocado de un corazón en suspenso.`,
+  },
+  {
     title: '🌙 Suspenso en la Niebla (Tensión Alta)',
     category: 'Misterio',
     tone: 'misterio' as const,
